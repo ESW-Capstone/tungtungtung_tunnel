@@ -304,3 +304,7 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Firmware 
+firmware/build/ 
+firmware/output/ 
