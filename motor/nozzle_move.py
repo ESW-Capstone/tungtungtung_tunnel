@@ -52,7 +52,7 @@ def move(path, r_start, theta_start, linear_speed=0, duration=0, visualize=False
                 interp_r = curr_r + speed_r * t
                 interp_theta = curr_theta + speed_theta * t
 
-                if t > 0:  # ← 이 조건이 핵심입니다
+                if t > 0:
                     r_history.append(interp_r)
                     theta_history.append(interp_theta)
 
