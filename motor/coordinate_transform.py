@@ -28,6 +28,8 @@ path = [
     (2.15, 158.2),
     (2, 180)
 ]
+
+# 3cm/s의 속도로 노즐이 이동하게끔 함(linear_speed값 수정하쇼)
 r, theta = move(path, r_start=0, theta_start=-180, linear_speed=3, visualize=True)
 
 # 복귀 이동 (5초 동안 0, 0으로)
