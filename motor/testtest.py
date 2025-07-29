@@ -23,8 +23,8 @@ def listen_from_arduino2():
                 print("녹음분석")
             elif line == "READY":
                 print(" → [ACTION] 보정 완료, 모터 명령 실행")
-                send_to_arduino2("1,F,2.0,5")
-                send_to_arduino2("2,F,30.0,90")
+                send_to_arduino2("1,F,2.0,5")   #모터id 1(r축), F:정방향/B:역방향, 이동속도, 이동거리(cm)
+                send_to_arduino2("2,F,30.0,90") #모터id 2(theta축), F:정방향/B:역방향, 이동속도, 이동거리(각도)
                 time.sleep(10)
                 send_to_arduino2("NORMAL")
         time.sleep(0.5)
