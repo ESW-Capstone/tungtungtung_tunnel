@@ -1,3 +1,5 @@
+# GO -> 팔이 앞으로, 초음파 센서로 멈추기
+
 import serial
 import time
 import threading
