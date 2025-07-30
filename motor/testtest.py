@@ -1,3 +1,5 @@
+# 앙 기모띠
+
 import serial
 import time
 import threading
