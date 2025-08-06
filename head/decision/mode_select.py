@@ -3,7 +3,7 @@
 
 import rospy
 from std_msgs.msg import Int32
-from std_srvs.srv import Trigger, TriggerRequest  # 쓰면 유지, 안 쓰면 삭제
+from std_srvs.srv import Trigger, TriggerRequest  
 from your_pkg.srv import ThermalWorker, ThermalWorkerRequest
 from your_pkg.srv import MicWorker, MicWorkerRequest
 from your_pkg.srv import SiliconeWorker, SiliconeWorkerRequest
@@ -13,13 +13,13 @@ class ModeSelector(object):
         self.node_name = 'mode_selector'
         rospy.init_node(self.node_name)
 
-        # 모드 상태
+       
         self.mode = 0
 
-        # 모드 발행
+        
         self.mode_pub = rospy.Publisher('/current_mode', Int32, queue_size=10)
 
-        # 서비스 프록시(동기)
+        
         self.thermal_cli  = rospy.ServiceProxy('/thermal_worker',  ThermalWorker)
         self.mic_cli      = rospy.ServiceProxy('/mic_worker',      MicWorker)
         self.silicone_cli = rospy.ServiceProxy('/silicone_worker', SiliconeWorker)
@@ -60,7 +60,7 @@ class ModeSelector(object):
                     self.mode = 0
 
         except rospy.ROSException as e:
-            # 서비스가 준비 안 된 경우 등
+            # 서비스가 준비 안 된 경우 등등
             rospy.logwarn_throttle(2.0, "Service not available yet: %s", str(e))
         except rospy.ServiceException as e:
             rospy.logerr("Service call failed: %s", str(e))
@@ -73,3 +73,4 @@ class ModeSelector(object):
 if __name__ == '__main__':
     node = ModeSelector()
     node.spin()
+
