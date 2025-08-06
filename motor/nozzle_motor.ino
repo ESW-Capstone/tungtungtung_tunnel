@@ -1,5 +1,5 @@
 // ============================
-// Arduino1 Code (Sensor + Solenoid)
+// Arduino nozzle Code (Sensor + Solenoid)
 // ============================
 #include <Stepper.h>
 
@@ -16,11 +16,14 @@ Stepper m1(REV, 8, 10, 9, 11);  // r motor
 Stepper m2(REV, 4, 6, 5, 7);    // theta motor
 
 String input = "";
+String sendBuffer = "";  // 출력 버퍼
+
 bool ready1 = false, ready2 = false;
 int remain1 = 0, remain2 = 0;
 int dir1 = 0, dir2 = 0;
 float delay1 = 0, delay2 = 0;
 unsigned long lastStep1 = 0, lastStep2 = 0;
+
 bool measuring = false;
 bool triggered = false;
 unsigned long lastSendTime = 0;
@@ -36,25 +39,29 @@ void setup() {
 void loop() {
   readSerial();
   updateMotors();
-  if (measuring) sendDistance();
+  if (measuring) sendDistance();    //measuring이 True일 경우에만 초음파데이터 송신
+
+  // === 출력 처리 ===
+  if (sendBuffer != "") {
+    Serial.println(sendBuffer);
+    sendBuffer = "";
+  }
 }
 
 void readSerial() {
   while (Serial.available()) {
     char c = Serial.read();
     if (c == '\n' || c == '\r') {
-      if (input == "STOP") {
+      if (input == "STOP") {        //"STOP"일 경우 측정하지 않음, 초음파 데이터값을 추출하지 않음
         measuring = false;
-      } else if (input == "GO" || input == "ABNORMAL") {
+      } else if (input == "GO" || input == "ABNORMAL") {    //"GO" 또는 "ABNORMAL"의 경우 초음파 데이터 값을 추출함
         measuring = true;
-      } else if (input == "HIT") {
+      } else if (input == "HIT") {   //"HIT"의 경우 0.4초 기다리고 솔레노이드로 타일 타격
         digitalWrite(solenoidPin, HIGH);
-        delay(2000);
+        delay(400);
         digitalWrite(solenoidPin, LOW);
-        Serial.println("CHECK");
-        Serial.flush();
       } else {
-        processCommand(input);
+        processCommand(input);    //모터제어 명령 받아옴
       }
       input = "";
     } else {
@@ -63,7 +70,7 @@ void readSerial() {
   }
 }
 
-void processCommand(String cmd) {
+void processCommand(String cmd) {       //모터id, 방향, 속도, 이동거리
   int i1 = cmd.indexOf(',');
   int i2 = cmd.indexOf(',', i1 + 1);
   int i3 = cmd.indexOf(',', i2 + 1);
@@ -73,7 +80,7 @@ void processCommand(String cmd) {
   float speed = cmd.substring(i2 + 1, i3).toFloat();
   float distance = cmd.substring(i3 + 1).toFloat();
   if (id == 1) {
-    remain1 = int(distance / CM_PER_STEP + 0.5);
+    remain1 = int(distance / CM_PER_STEP + 0.5);            // 거리/속도 => 시간
     delay1 = max(1000.0 * CM_PER_STEP / speed, MIN_DELAY_MS);
     dir1 = (dir == 'F') ? -1 : 1;
     lastStep1 = millis(); ready1 = true;
@@ -85,7 +92,7 @@ void processCommand(String cmd) {
   }
 }
 
-void updateMotors() {
+void updateMotors() {         //남은 시간이 있다면 계속 돌도록 아닌 경우 멈춤
   unsigned long now = millis();
   if (ready1 && remain1 > 0 && (now - lastStep1) >= delay1) {
     m1.step(dir1); remain1--; lastStep1 = now;
@@ -95,7 +102,8 @@ void updateMotors() {
   }
   if (remain1 <= 0) ready1 = false;
   if (remain2 <= 0) ready2 = false;
-    // === 전원 차단 ===
+
+  // === 전원 차단 ===
   if (!ready1 && !ready2) {
     for (int i = 4; i <= 11; i++) {
       digitalWrite(i, LOW);
@@ -103,7 +111,7 @@ void updateMotors() {
   }
 }
 
-void sendDistance() {
+void sendDistance() {         //초음파 데이터 보내는 함수(DIST,~로 보냄)
   if (millis() - lastSendTime > 100) {
     long duration;
     float distance;
