@@ -8,20 +8,20 @@
 #define IN4 9
 #define ENB 10
 
-#define ENCODER_Y 2
-#define ENCODER_G 3
+#define LEFT_Y 2
+#define LEFT_G 3
 
 // === 엔코더 객체 ===
-Encoder myEnc(ENCODER_Y, ENCODER_G);
+Encoder myEnc(LEFT_Y, LEFT_G);
 
 // === 상태 변수 ===
 String input = "";
 long oldPosition = -999;
-int goSpeed = 200;
-int backSpeed = 100;
-int bigSpeed = 80;
-int smallSpeed = 50;
-int pwmSpeed = 125;  // 기본 속도 (0~255)
+int goSpeed = 70;
+int backSpeed = 60;
+int pwmSpeed = 150;  // 회전 속도 (0~255)
+int bigSpeed = 150;
+int smallSpeed = 20;
 
 void setup() {
   Serial.begin(9600);
@@ -38,7 +38,7 @@ void setup() {
   // 초기 상태 정지
   stopMotors();
 
-  Serial.println("입력: go / stop / back / right / left");
+  Serial.println("입력: w / a / s / d / q");
 }
 
 void loop() {
@@ -55,15 +55,15 @@ void loop() {
     input = Serial.readStringUntil('\n');
     input.trim(); // 개행 문자 제거
 
-    if (input == "go") {
+    if (input == "w") {
       forward();
-    } else if (input == "stop") {
+    } else if (input == "q") {
       stopMotors();
-    } else if (input == "back") {
+    } else if (input == "s") {
       backward();
-    } else if (input == "right") {
+    } else if (input == "d") {
       right();
-    } else if (input == "left") {
+    } else if (input == "a") {
       left();
     }
   }
@@ -74,11 +74,11 @@ void loop() {
 void forward() {
   digitalWrite(IN1, LOW);
   digitalWrite(IN2, HIGH);
-  analogWrite(ENA, pwmSpeed);
+  analogWrite(ENA, goSpeed);
 
-  digitalWrite(IN3, HIGH);
-  digitalWrite(IN4, LOW);
-  analogWrite(ENB, pwmSpeed);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+  analogWrite(ENB, goSpeed);
 
   Serial.println("정회전 시작");
 }
@@ -86,22 +86,22 @@ void forward() {
 void backward() {
   digitalWrite(IN1, HIGH);
   digitalWrite(IN2, LOW);
-  analogWrite(ENA, pwmSpeed);
+  analogWrite(ENA, backSpeed);
 
-  digitalWrite(IN3, LOW);
-  digitalWrite(IN4, HIGH);
-  analogWrite(ENB, pwmSpeed);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+  analogWrite(ENB, backSpeed);
 
   Serial.println("역회전 시작");
 }
 
 void stopMotors() {
   digitalWrite(IN1, LOW);
-  digitalWrite(IN2, HIGH);
+  digitalWrite(IN2, LOW);
   analogWrite(ENA, 0);
 
   digitalWrite(IN3, LOW);
-  digitalWrite(IN4, HIGH);
+  digitalWrite(IN4, LOW);
   analogWrite(ENB, 0);
 
   Serial.println("모터 정지");
@@ -110,23 +110,23 @@ void stopMotors() {
 void right() {
   digitalWrite(IN1, LOW);
   digitalWrite(IN2, HIGH);
-  analogWrite(ENA, bigSpeed);
+  analogWrite(ENA, pwmSpeed);
 
-  digitalWrite(IN3, LOW);
-  digitalWrite(IN4, HIGH);
-  analogWrite(ENB, smallSpeed);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+  analogWrite(ENB, pwmSpeed);
 
   Serial.println("오른쪽 회전");
 }
 
 void left() {
-  digitalWrite(IN1, LOW);
-  digitalWrite(IN2, HIGH);
-  analogWrite(ENA, smallSpeed);
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  analogWrite(ENA, pwmSpeed);
 
   digitalWrite(IN3, LOW);
   digitalWrite(IN4, HIGH);
-  analogWrite(ENB, bigSpeed);
+  analogWrite(ENB, pwmSpeed);
 
   Serial.println("왼쪽 회전");
 }
