@@ -47,14 +47,14 @@ def send_serial(cmd):
 # === Thermal 콜백 ===
 def thermal_callback(msg):
     global thermal_triggered
-    if msg.data:
+    if msg.data: # 0 False, 1 True 
         with lock:
             thermal_triggered = True
-            send_serial('Q')  # 즉시 정지
-            rospy.logwarn("[THERMAL] Detected! Emergency Stop Triggered.")
+            send_serial('Q')  # if get signal -> stop.
+            rospy.logwarn("[THERMAL] Detected! Emergency Stop Triggered.") # change to mode 1
 
-# === 서보모터 제어 ===
-def move_servo():
+# === 서보모터 제어 , 30 -> 0 추가해야함
+def move_servo(): 
     for angle in range(0, 31):
         send_serial(f'{angle}')
         rospy.loginfo(f"[AUTO] Servo Angle: {angle}")
@@ -92,7 +92,7 @@ def auto_mode_loop():
 # === 메인 ===
 def main():
     rospy.init_node('drive_node')
-    rospy.Subscriber('/thermal_flag_mode0', Bool, thermal_callback)
+    rospy.Subscriber('/thermal_flag_mode0', Bool, thermal_callback) # 0 -> False, 1 -> True
 
     # 스레드 시작
     threading.Thread(target=keyboard_listener, daemon=True).start()
