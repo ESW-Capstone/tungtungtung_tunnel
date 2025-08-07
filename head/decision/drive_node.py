@@ -13,6 +13,7 @@ ser = serial.Serial('/dev/ttyTHS1', 9600, timeout=1)
 time.sleep(2)  # 시리얼 안정화
 
 # === 글로벌 상태 ===
+
 manual_mode = False
 thermal_triggered = False
 lock = threading.Lock()
@@ -53,7 +54,7 @@ def thermal_callback(msg):
             send_serial('Q')  # if get signal -> stop.
             rospy.logwarn("[THERMAL] Detected! Emergency Stop Triggered.") # change to mode 1
 
-# === 서보모터 제어 , 30 -> 0 추가해야함
+# === 서보모터 제어 , get_angle -> 0, 0 -> get_angle
 def move_servo(): 
     for angle in range(0, 31):
         send_serial(f'{angle}')
