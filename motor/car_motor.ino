@@ -3,7 +3,7 @@
 #include <Servo.h>
 
 // ===== I2C =====
-#define I2C_ADDR 0x06        // 아두이노 슬레이브 주소
+#define I2C_ADDR 0x18        // 아두이노 슬레이브 주소
 
 // ===== 모터 핀 =====
 #define IN1 4
