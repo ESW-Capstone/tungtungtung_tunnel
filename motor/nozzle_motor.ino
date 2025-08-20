@@ -24,7 +24,7 @@ int dir1 = 0, dir2 = 0;
 float delay1 = 0, delay2 = 0;
 unsigned long lastStep1 = 0, lastStep2 = 0;
 
-bool measuring = false;
+bool measuring = true;
 bool triggered = false;
 unsigned long lastSendTime = 0;
 
