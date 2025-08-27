@@ -18,10 +18,10 @@ scale_x = RESIZED[0] / SHAPE[1]
 scale_y = RESIZED[1] / SHAPE[0]
 
 def mlx_setting():
-    i2c = busio.I2C(board.SCL, board.SDA, frequency=1200000)
+    i2c = busio.I2C(board.SCL, board.SDA, frequency=1000000)
     #27,28 line -> i2c = busio.I2C(board.SCL, board.SDA, frequency=1200000)
     mlx = adafruit_mlx90640.MLX90640(i2c)
-    mlx.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_8_HZ
+    mlx.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_16HZ    #<-16HZ
     return mlx
 
 def temp_to_u8(arr, vmin=22.0, vmax=36.0):
@@ -101,7 +101,7 @@ def main():
     time.sleep(4)
 
     try:
-        while True:
+        while not rospy.is_shutdown():
             t0 = time.time()
 
             with i2c_lock(block=True):

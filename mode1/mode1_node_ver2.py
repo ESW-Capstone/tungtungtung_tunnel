@@ -179,7 +179,7 @@ def main():
     rospy.init_node("mode1_node")
 
     global UART1_PORT, UART1_BAUD, I2C_BUS_NO, I2C_ADDR2, I2C_ADDR3
-    UART1_PORT = param("uart1_port",  "/dev/ttyTHS1")
+    UART1_PORT = param("uart1_port",  "/dev/ttyACM0")
     UART1_BAUD = param("uart1_baud",  9600)
     I2C_BUS_NO = param("i2c_bus_no",  1)
     I2C_ADDR2  = param("arduino2_addr", 0x18)
