@@ -4,7 +4,7 @@ import rospy, time, sys, termios, tty, threading
 
 from std_msgs.msg import Bool, String
 from smbus2 import SMBus, i2c_msg
-from angle_calculate import listen_from_arduino, get_angle
+from angle_calculate import listen_from_arduino, get_angle, close_arduino
 
 
 i2c = None
@@ -89,6 +89,7 @@ def thermal_callback(msg: Bool):
         time.sleep(0.2)
         i2c_send('STOP')
         rospy.logwarn("[THERMAL] Emergency Stop")
+        close_arduino
         if mode_pub:
             mode_pub.publish("found")
 

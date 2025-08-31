@@ -1,15 +1,14 @@
 #!/home/tunnel/jetson_project/yolov_env/bin/python
 
 import rospy
-import serial
 import threading
 import time
 import sys
 from std_msgs.msg import String, Int32
 from smbus2 import i2c_msg
 
-from arm_control import (go_mode, quit_mode, for_step_publish)
-from angle_calculate import close_arduino
+# arm_control에서만 시리얼을 열고/닫음
+from arm_control import (go_mode, quit_mode, for_step_publish, send_to_arduino, shutdown_node)
 from sound_data import sound_data
 
 try:
@@ -20,8 +19,9 @@ except ImportError:
 def param(name, default):
     return rospy.get_param("~" + name, default)
 
-UART1_PORT = None
-UART1_BAUD = 9600
+# UART(시리얼) 설정은 여기서 쓰지 않음 (arm_control만 사용)
+# UART1_PORT = None
+# UART1_BAUD = 9600
 
 I2C_BUS_NO = 0
 I2C_ADDR2  = 0x18  # pillar/slide
@@ -30,7 +30,7 @@ I2C_ADDR3  = 0x08  # W/S drive (confirmed)
 manual_lock = threading.Lock()
 manual_command = None
 
-uart1_ser = None
+# uart1_ser = None   # 제거
 i2c_bus   = None
 
 # === Emergency stop ===
@@ -47,9 +47,9 @@ def emergency_stop(reason="keyboard"):
         except Exception as e: rospy.logwarn(f"[EMERGENCY] pillar stop fail: {e}")
         try: quit_mode()
         except Exception as e: rospy.logwarn(f"[EMERGENCY] quit_mode failed: {e}")
+        # UART 알림은 arm_control의 전역 핸들을 통해 전송 (여기서 새로 오픈하지 않음)
         try:
-            if uart1_ser and uart1_ser.is_open:
-                uart1_ser.write(b"STOP\n"); uart1_ser.flush()
+            send_to_arduino("STOP", ensure_open=False)  # 이미 열려있을 때만 전송
         except Exception as e:
             rospy.logwarn(f"[EMERGENCY] UART notify failed: {e}")
     except Exception as e:
@@ -69,45 +69,28 @@ def keyboard_listener_thread():
             rospy.logwarn(f"[KEY] error: {e}")
             time.sleep(0.1)
 
-def open_uart(port, baud, name):
-    if not port: return None
-    try:
-        ser = serial.Serial(port, baud, timeout=0.05)
-        time.sleep(2.0)
-        ser.reset_input_buffer(); ser.reset_output_buffer()
-        rospy.loginfo(f"[{name}] open {port}@{baud}")
-        return ser
-    except Exception as e:
-        rospy.logwarn(f"[{name}] open fail: {e}")
-        return None
+_last_i2c_cmd = {}   # 주소별 마지막 전송 명령 저장
 
 def i2c_send_text(addr, text):
+    global _last_i2c_cmd
     if i2c_bus is None:
         rospy.logwarn("[I2C] bus not available"); return
+
+    # 같은 명령 반복이면 무시
+    if _last_i2c_cmd.get(addr) == text:
+        return
+
     try:
         data = text.encode('ascii')[:31]  # Wire 32-byte limit
         msg = i2c_msg.write(addr, data)
         i2c_bus.i2c_rdwr(msg)
+        rospy.loginfo(f"[I2C->0x{addr:02X}] {text}")
+        _last_i2c_cmd[addr] = text
     except Exception as e:
         rospy.logwarn(f"[I2C->0x{addr:02X}] send fail: {e}")
 
-def uart1_listener_thread():
-    if uart1_ser is None:
-        rospy.logwarn("[UART1] listener disabled (no port)")
-        return
-    while not rospy.is_shutdown():
-        try:
-            line = uart1_ser.readline().decode(errors='ignore').strip()
-            if not line:
-                time.sleep(0.05); continue
-            u = line.upper()
-            if u == "STOP":
-                emergency_stop("uart:STOP")
-            elif u == "HIT_READY":
-                rospy.loginfo("[ACTION] Recording ready")
-        except Exception as e:
-            rospy.logwarn(f"[UART1 RX] error: {e}")
-            time.sleep(0.1)
+# UART 리스너는 사용하지 않음(시리얼 읽기는 arm_control/angle_calculate 한 곳에서만)
+# def uart1_listener_thread(): ...
 
 def x_control(topic='/have_to_move_x', i2c_addr=None, tx_cooldown=0.20, rate_hz=20):
     if i2c_addr is None: i2c_addr = I2C_ADDR3
@@ -142,7 +125,7 @@ def y_control(topic='/have_to_move_y', i2c_addr=None, tx_cooldown=0.20, rate_hz=
         v = int(msg.data)
         if v > 0: cmd = 'UP'
         # elif v < 0: cmd = 'DOWN'
-        else: cmd = 'PILLAR_STOP'     
+        else: cmd = 'PILLAR_STOP'
         now = time.time()
         if cmd != prev_cmd or (now - last_tx) >= tx_cooldown:
             i2c_send_text(i2c_addr, cmd)
@@ -209,7 +192,7 @@ def run_mode1_sequence():
     timeout_sec = param("y_preseek_timeout", 8.0)  # 0 이면 무한 대기
     found = pre_y_seek(topic='/have_to_move_y', i2c_addr=I2C_ADDR2,
                        tx_cooldown=0.20, rate_hz=20, timeout_sec=timeout_sec)
-    
+
     # === 타임아웃 처리: 프로그램 종료 ===
     if (timeout_sec > 0) and (not found):
         rospy.logerr(f"[MODE1] /have_to_move_y not received within {timeout_sec:.1f}s — aborting")
@@ -225,7 +208,7 @@ def run_mode1_sequence():
     # 4) Y 정렬
     if _emergency_evt.is_set():
         return False
-    
+
     ok_y = y_control()
     if not ok_y:
         rospy.logwarn("[MODE1] Y-phase ended (possibly emergency)")
@@ -233,68 +216,66 @@ def run_mode1_sequence():
     return (ok_x and ok_y and not _emergency_evt.is_set())
 
 def main():
-    global uart1_ser, i2c_bus
+    global i2c_bus
     rospy.init_node("mode1_node")
 
-    global UART1_PORT, UART1_BAUD, I2C_BUS_NO, I2C_ADDR2, I2C_ADDR3
-    UART1_PORT = param("uart1_port",  "/dev/ttyACM0")
-    UART1_BAUD = param("uart1_baud",  9600)
+    global I2C_BUS_NO, I2C_ADDR2, I2C_ADDR3
     I2C_BUS_NO = param("i2c_bus_no",  0)
     I2C_ADDR2  = param("arduino2_addr", 0x18)
     I2C_ADDR3  = param("arduino3_addr", 0x08)  # stays 0x08
 
     threading.Thread(target=keyboard_listener_thread, daemon=True).start()
 
-    uart1_ser = open_uart(UART1_PORT, UART1_BAUD, "UART1")
-    threading.Thread(target=uart1_listener_thread, daemon=True).start()
-
-    if SMBus is not None:
-        try:
-            i2c_bus = SMBus(I2C_BUS_NO)
-            rospy.loginfo(f"[I2C] bus {I2C_BUS_NO} ready, A2=0x{I2C_ADDR2:02X}, A3=0x{I2C_ADDR3:02X}")
-        except Exception as e:
-            rospy.logwarn(f"[I2C] open fail: {e}")
-            i2c_bus = None
-    else:
-        rospy.logwarn("[I2C] smbus2 not installed; I2C control unavailable")
-
-    if not _emergency_evt.is_set():
-        ok = run_mode1_sequence()
-        rospy.loginfo(f"mode 1 sequence done, ok={ok}")
-        # 노드가 종료 신호를 받았거나(타임아웃 등), 비상 이벤트면 즉시 종료
-        if rospy.is_shutdown() or _emergency_evt.is_set() or (not ok):
-            return
-
-    if not _emergency_evt.is_set():
-        try:
-            go_mode(lambda: _emergency_evt.is_set())  # 내부에서 거리 읽음, newest added(for emergency stop)
-        except Exception as e:
-            rospy.logwarn(f"go_mode failed: {e}")
-
-    if not _emergency_evt.is_set():
-        sound_val = sound_data()  # 1: bad, 0: good, -1/None: invalid
-        sound_answer = "abnormal" if sound_val == 1 else ("normal" if sound_val == 0 else None)
-        sound_pub = rospy.Publisher("/mode_result", String, queue_size=1)
-        if sound_answer is not None:
-            sound_pub.publish(String(data=sound_answer))
-        else:
-            rospy.logwarn("publish skipped (no valid result)")
-        rospy.sleep(0.5)
-        for_step_publish()
-
+    # 시리얼 오픈은 arm_control 쪽에서만 수행 (여기서 절대 열지 않음)
+    # uart1_ser = open_arduino(...)  # 삭제
+    # threading.Thread(target=uart1_listener_thread, daemon=True).start()  # 사용 안 함
     try:
+        if SMBus is not None:
+            try:
+                i2c_bus = SMBus(I2C_BUS_NO)
+                rospy.loginfo(f"[I2C] bus {I2C_BUS_NO} ready, A2=0x{I2C_ADDR2:02X}, A3=0x{I2C_ADDR3:02X}")
+            except Exception as e:
+                rospy.logwarn(f"[I2C] open fail: {e}")
+                i2c_bus = None
+        else:
+            rospy.logwarn("[I2C] smbus2 not installed; I2C control unavailable")
+
+        should_exit = False
+
+        if not _emergency_evt.is_set():
+            ok = run_mode1_sequence()
+            rospy.loginfo(f"mode 1 sequence done, ok={ok}")
+            # 노드가 종료 신호를 받았거나(타임아웃 등), 비상 이벤트면 즉시 종료
+            if rospy.is_shutdown() or _emergency_evt.is_set() or (not ok):
+                should_exit = True
+
+        if not _emergency_evt.is_set():
+            try:
+                # go_mode 내부에서 거리 읽기는 arm_control 쪽 시리얼 핸들로 진행됨
+                go_mode(lambda: _emergency_evt.is_set())
+            except Exception as e:
+                rospy.logwarn(f"go_mode failed: {e}")
+
+        if not _emergency_evt.is_set():
+            sound_val = sound_data()  # 1: bad, 0: good, -1/None: invalid
+            sound_answer = "abnormal" if sound_val == 1 else ("normal" if sound_val == 0 else None)
+            sound_pub = rospy.Publisher("/mode_result", String, queue_size=1)
+            if sound_answer is not None:
+                sound_pub.publish(String(data=sound_answer))
+            else:
+                rospy.logwarn("publish skipped (no valid result)")
+            rospy.sleep(0.5)
+            for_step_publish()
+
         r = rospy.Rate(10)
         while not rospy.is_shutdown() and not _emergency_evt.is_set():
             r.sleep()
     finally:
-        try: close_arduino()
-        except: pass
-        try:
-            if uart1_ser and uart1_ser.is_open: uart1_ser.close()
-        except: pass
-        try:
-            if i2c_bus: i2c_bus.close()
-        except: pass
+        # close_arduino() 호출 금지: arm_control에서만 닫음
+        if i2c_bus:
+            try: i2c_bus.close()
+            except: pass
+        shutdown_node()
         rospy.loginfo("mode1_node exit")
 
 if __name__ == '__main__':

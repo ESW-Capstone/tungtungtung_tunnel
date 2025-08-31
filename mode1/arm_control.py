@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# arm_control.py — ArduinoLink 제거 버전 (전역 시리얼 1개 + 함수형)
+
 import Jetson.GPIO as GPIO
 import time
 import rospy
@@ -7,7 +10,9 @@ import threading
 from angle_calculate import listen_from_arduino
 from std_msgs.msg import Int32
 
-# === GPIO Setup ===
+# =====================
+# GPIO 설정
+# =====================
 IN1, IN2, IN3, IN4 = 17, 18, 27, 22
 
 _GPIO_INITED = False
@@ -42,33 +47,69 @@ def cleanup_gpio():
             pass
         _GPIO_INITED = False
 
-# === Persistent serial ===
-class ArduinoLink:
-    def __init__(self, port='/dev/ttyACM0', baud=9600, timeout=1):
-        self._lock = threading.Lock()
-        self._ser = serial.Serial(port, baud, timeout=timeout)
+# =====================
+# 전역 시리얼 (단일 핸들)
+# =====================
+_arduino = None
+_serial_lock = threading.Lock()
 
-    def send(self, msg: str):
-        with self._lock:
-            try:
-                self._ser.write((msg + "\n").encode())
-                rospy.loginfo(f"[TX->Arduino] {msg}")
-            except serial.SerialException as e:
-                rospy.logerr(f"Serial error: {e}")
-
-    def close(self):
+def open_serial(port="/dev/ttyACM0", baud=9600, timeout=0.2):
+    """시리얼을 한 번만 오픈해서 전역으로 보관."""
+    global _arduino
+    if _arduino is None or (not _arduino.is_open):
+        _arduino = serial.Serial(port=port, baudrate=baud, timeout=timeout)
+        time.sleep(2.0)  # 보드 리셋 안정화
         try:
-            self._ser.close()
+            _arduino.reset_input_buffer()
+            _arduino.reset_output_buffer()
         except Exception:
             pass
+        rospy.loginfo(f"[SERIAL] open {port}@{baud}")
+    return _arduino
 
-# === Motion / thresholds ===
+def current_serial():
+    """현재 전역 시리얼 핸들 반환(없으면 None)."""
+    return _arduino
+
+def close_serial():
+    """전역 시리얼 닫기(한 곳에서만 호출)."""
+    global _arduino
+    if _arduino and _arduino.is_open:
+        try:
+            _arduino.close()
+            rospy.loginfo("[SERIAL] closed")
+        except Exception:
+            pass
+    _arduino = None
+
+def send_to_arduino(msg: str, ensure_open=True, port="/dev/ttyACM0", baud=9600, timeout=0.2):
+    """쓰레드 세이프 TX. 필요 시 자동 오픈."""
+    ser = current_serial()
+    if ensure_open and (ser is None or not ser.is_open):
+        ser = open_serial(port, baud, timeout)
+    if ser is None or not ser.is_open:
+        rospy.logwarn("[SERIAL] not open; skip send")
+        return False
+    data = (msg + "\n").encode()
+    with _serial_lock:
+        try:
+            ser.write(data)
+            ser.flush()
+            rospy.loginfo(f"[TX->Arduino] {msg}")
+            return True
+        except Exception as e:
+            rospy.logwarn(f"[SERIAL] write fail: {e}")
+            return False
+
+# =====================
+# 모션/상수
+# =====================
 moved_steps = 0
 
 CM_PER_STEP = 1.0 / 450.0
 DEFAULT_SPEED_CM_S = 2.0
-DIST_THRESHOLD_GO = 5.0
-DIST_THRESHOLD_ABNORMAL = 10.0
+DIST_THRESHOLD_GO = 5.0          # < 5cm 이면 정지 (전진)
+DIST_THRESHOLD_ABNORMAL = 10.0   # > 10cm 이면 정지 (후진)
 
 SEQ = [
     [1, 0, 0, 0],
@@ -81,15 +122,11 @@ SEQ = [
     [1, 0, 0, 1],
 ]
 
-# === Globals initialized at runtime ===
-arduino = None
+# 런타임 전역
 step_pub = None
 
-def send_to_arduino(msg: str):
-    if arduino is not None:
-        arduino.send(msg)
-
 def move_motor(steps, delay=0.005, direction=1):
+    """direction=+1 전진, -1 후진"""
     _ensure_gpio_ready()
     seq = SEQ if direction == 1 else SEQ[::-1]
     for _ in range(steps):
@@ -104,32 +141,44 @@ def publish_steps():
     if step_pub is not None:
         step_pub.publish(Int32(data=moved_steps))
 
-# === GO ===
-def go_mode(should_stop=None):
-    """전방 이동: 거리 < 5cm면 정지"""
+# =====================
+# GO: 전방 이동
+# =====================
+def go_mode(should_stop=None, serial_port="/dev/ttyACM0", baud=9600, timeout=0.2):
+    """
+    전방 이동: 거리 < 5cm면 정지
+    should_stop: callable -> True면 즉시 정지(비상정지 연동)
+    """
     global moved_steps
     rospy.loginfo("GO: Moving forward until distance < 5cm")
-    send_to_arduino("GO")
-    delay = max(0.002, 1.0 / (DEFAULT_SPEED_CM_S * 450*8))  #newest added
+    send_to_arduino("GO", ensure_open=True, port=serial_port, baud=baud, timeout=timeout)
+
+    # 최신 코드 반영(감속 포함): 450*8
+    delay = max(0.002, 1.0 / (DEFAULT_SPEED_CM_S * 450 * 8))
     step = 1
     miss = 0
+
+    ser = open_serial(serial_port, baud, timeout)  # 동일 핸들 확보
     try:
         while not rospy.is_shutdown():
+            if should_stop and should_stop():
+                rospy.logwarn("[GO] should_stop() -> STOP")
+                break
             try:
-                dist_cm = listen_from_arduino()
+                dist_cm = listen_from_arduino(ser=ser)
                 if dist_cm is None:
                     miss += 1
                     if miss >= 100:
-                        rospy.logwarn("no distance received")
+                        rospy.logwarn("[GO] no distance received")
                         break
                     continue
                 miss = 0
             except Exception as e:
-                rospy.logwarn(f"listen_from_arduino() failed : {e}")
+                rospy.logwarn(f"[GO] listen_from_arduino() failed: {e}")
                 break
 
             if dist_cm < DIST_THRESHOLD_GO:
-                rospy.loginfo("Distance < 5cm -> STOP")
+                rospy.loginfo("[GO] Distance < 5cm -> STOP")
                 break
 
             move_motor(step, delay=delay, direction=1)
@@ -139,32 +188,39 @@ def go_mode(should_stop=None):
         send_to_arduino("STOP")
         cleanup_gpio()
 
-# === ABNORMAL ===
-def abnormal_mode():
-    """후진: 거리 > 10cm면 정지 → 시퀀스 전송"""
+# =====================
+# ABNORMAL: 후진/시퀀스
+# =====================
+def abnormal_mode(serial_port="/dev/ttyACM0", baud=9600, timeout=0.2):
+    """
+    후진: 거리 > 10cm면 정지 → 후속 시퀀스 전송
+    """
     global moved_steps
     rospy.loginfo("ABNORMAL: Moving backward until distance > 10cm")
-    send_to_arduino("ABNORMAL")
+    send_to_arduino("ABNORMAL", ensure_open=True, port=serial_port, baud=baud, timeout=timeout)
+
     delay = max(0.002, 1.0 / (DEFAULT_SPEED_CM_S * 450))
     step = 1
     miss = 0
+
+    ser = open_serial(serial_port, baud, timeout)
     try:
         while not rospy.is_shutdown():
             try:
-                d = listen_from_arduino()
+                d = listen_from_arduino(ser=ser)
                 if d is None:
                     miss += 1
                     if miss >= 100:
-                        rospy.logwarn("no distance received")
+                        rospy.logwarn("[ABN] no distance received")
                         break
                     continue
                 miss = 0
             except Exception as e:
-                rospy.logwarn(f"listen_from_arduino() failed : {e}")
+                rospy.logwarn(f"[ABN] listen_from_arduino() failed: {e}")
                 break
 
             if d > DIST_THRESHOLD_ABNORMAL:
-                rospy.loginfo("Distance > 10cm -> STOP")
+                rospy.loginfo("[ABN] Distance > 10cm -> STOP")
                 break
 
             move_motor(step, delay=delay, direction=-1)
@@ -174,12 +230,14 @@ def abnormal_mode():
         send_to_arduino("STOP")
         cleanup_gpio()
 
-    # 후속 동작 시리얼 명령(필요 시 유지)
+    # 후속 동작(필요 시 조정)
     send_to_arduino("1,F,2.0,5")
     send_to_arduino("2,F,30.0,90")
     time.sleep(5)
 
-# === NORMAL ===
+# =====================
+# NORMAL: 복귀
+# =====================
 def normal_mode():
     """원위치 복귀: 이동한 스텝만큼 되감기"""
     global moved_steps
@@ -194,25 +252,26 @@ def normal_mode():
     finally:
         cleanup_gpio()
 
-# === QUIT ===
+# =====================
+# QUIT: 종료 정리
+# =====================
 def quit_mode():
     """종료: 모든 모터 off + GPIO 해제"""
     rospy.loginfo("QUIT: Turning off all motors")
-    send_to_arduino("QUIT")
+    send_to_arduino("QUIT", ensure_open=False)  # 이미 닫혀 있어도 무시됨
     cleanup_gpio()
 
-# === (옵션) 엔트리포인트: 노드 초기화/자원 정리 ===
-def init_node(node_name="motor_controller"):
-    global arduino, step_pub
+# =====================
+# (옵션) 노드 초기화/정리
+# =====================
+def init_node(node_name="motor_controller", port="/dev/ttyACM0", baud=9600, timeout=0.2):
+    global step_pub
     rospy.init_node(node_name, anonymous=False)
     step_pub = rospy.Publisher("/steps", Int32, queue_size=10)
-    arduino = ArduinoLink(port="/dev/ttyACM0", baud=9600, timeout=1)
+    open_serial(port=port, baud=baud, timeout=timeout)  # 한 번만 오픈
 
 def shutdown_node():
-    global arduino
     try:
         cleanup_gpio()
     finally:
-        if arduino:
-            arduino.close()
-            arduino = None
+        close_serial()  # 전역 한 곳에서만 닫기

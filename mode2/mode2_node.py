@@ -3,16 +3,12 @@ import time
 import threading
 import serial
 import re
-
-try:
-    import Jetson.GPIO as GPIO
-except ImportError:
-    import RPi.GPIO as GPIO
+import Jetson.GPIO as GPIO
 
 from smbus2 import SMBus
 import rospy
 from std_msgs.msg import String, Int32
-from camera_one_shot import capture_path_rtheta_validated
+from camera_path import capture_path_rtheta_validated
 
 def P(name, default):
     return rospy.get_param("~" + name, default)
@@ -51,7 +47,7 @@ class Arduino1:
             pass
 
 class Arduino2I2C:
-    def __init__(self, bus_id=1, addr=0x08):
+    def __init__(self, bus_id=0, addr=0x08):
         self.bus = SMBus(bus_id)
         self.addr = addr
 
@@ -83,7 +79,7 @@ class Mode2Node:
         rospy.init_node("mode2_node")
         self.serial_port  = P("serial_port", "/dev/ttyACM0")
         self.serial_baud  = P("serial_baud", 9600)
-        self.i2c_bus_id   = P("i2c_bus", 1)
+        self.i2c_bus_id   = P("i2c_bus", 0)
         self.i2c_addr     = P("i2c_address", 0x08)
         self.linear_speed = P("linear_speed_cm_s", 3.0)
         self.theta_scale  = P("theta_speed_scale", 3.0)
