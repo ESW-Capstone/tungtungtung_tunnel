@@ -183,8 +183,8 @@ def go_mode(should_stop=None, serial_port="/dev/ttyACM0", baud=9600, timeout=0.2
 
             move_motor(step, delay=delay, direction=1)
             moved_steps += step
-            publish_steps()
     finally:
+        publish_steps()
         send_to_arduino("STOP")
         cleanup_gpio()
 
@@ -225,8 +225,8 @@ def abnormal_mode(serial_port="/dev/ttyACM0", baud=9600, timeout=0.2):
 
             move_motor(step, delay=delay, direction=-1)
             moved_steps -= step
-            publish_steps()
     finally:
+        publish_steps()
         send_to_arduino("STOP")
         cleanup_gpio()
 
