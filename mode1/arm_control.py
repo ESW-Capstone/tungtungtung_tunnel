@@ -107,7 +107,7 @@ def send_to_arduino(msg: str, ensure_open=True, port="/dev/ttyACM0", baud=9600, 
 moved_steps = 0
 
 CM_PER_STEP = 1.0 / 450.0
-DEFAULT_SPEED_CM_S = 2.0
+DEFAULT_DELAY = 0.001
 DIST_THRESHOLD_GO = 5.0          # < 5cm 이면 정지 (전진)
 DIST_THRESHOLD_ABNORMAL = 10.0   # > 10cm 이면 정지 (후진)
 
@@ -154,8 +154,7 @@ def go_mode(should_stop=None, serial_port="/dev/ttyACM0", baud=9600, timeout=0.2
     send_to_arduino("GO", ensure_open=True, port=serial_port, baud=baud, timeout=timeout)
 
     # 최신 코드 반영(감속 포함): 450*8
-    delay = max(0.002, 1.0 / (DEFAULT_SPEED_CM_S * 450 * 8))
-    step = 1
+    step = 8
     miss = 0
 
     ser = open_serial(serial_port, baud, timeout)  # 동일 핸들 확보
@@ -181,7 +180,7 @@ def go_mode(should_stop=None, serial_port="/dev/ttyACM0", baud=9600, timeout=0.2
                 rospy.loginfo("[GO] Distance < 5cm -> STOP")
                 break
 
-            move_motor(step, delay=delay, direction=1)
+            move_motor(step, delay=DEFAULT_DELAY, direction=1)
             moved_steps += step
     finally:
         publish_steps()
@@ -199,8 +198,7 @@ def abnormal_mode(serial_port="/dev/ttyACM0", baud=9600, timeout=0.2):
     rospy.loginfo("ABNORMAL: Moving backward until distance > 10cm")
     send_to_arduino("ABNORMAL", ensure_open=True, port=serial_port, baud=baud, timeout=timeout)
 
-    delay = max(0.002, 1.0 / (DEFAULT_SPEED_CM_S * 450))
-    step = 1
+    step = 8
     miss = 0
 
     ser = open_serial(serial_port, baud, timeout)
@@ -223,7 +221,7 @@ def abnormal_mode(serial_port="/dev/ttyACM0", baud=9600, timeout=0.2):
                 rospy.loginfo("[ABN] Distance > 10cm -> STOP")
                 break
 
-            move_motor(step, delay=delay, direction=-1)
+            move_motor(step, delay=DEFAULT_DELAY, direction=-1)
             moved_steps -= step
     finally:
         publish_steps()
@@ -242,7 +240,7 @@ def normal_mode():
     """원위치 복귀: 이동한 스텝만큼 되감기"""
     global moved_steps
     rospy.loginfo(f"NORMAL: Returning {moved_steps} steps forward")
-    delay = max(0.002, 1.0 / (DEFAULT_SPEED_CM_S * 450))
+    delay = DEFAULT_DELAY
     try:
         if moved_steps > 0:
             move_motor(moved_steps, delay=delay, direction=-1)

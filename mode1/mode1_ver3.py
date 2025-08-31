@@ -265,7 +265,6 @@ def main():
             else:
                 rospy.logwarn("publish skipped (no valid result)")
             rospy.sleep(0.5)
-            for_step_publish()
 
         r = rospy.Rate(10)
         while not rospy.is_shutdown() and not _emergency_evt.is_set():
