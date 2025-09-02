@@ -209,7 +209,6 @@ def run_mode1_sequence():
 def main():
     global i2c_bus
     rospy.init_node("mode1_node")
-    init_node(node_name="motor_controller", port="/dev/ttyACM0", baud=9600, timeout=0.2)
 
     global I2C_BUS_NO, I2C_ADDR2, I2C_ADDR3
     I2C_BUS_NO = param("i2c_bus_no",  0)
@@ -243,10 +242,11 @@ def main():
             except Exception as e:
                 rospy.logwarn(f"go_mode failed: {e}")
 
+        sound_pub = rospy.Publisher("/mode_result", String, queue_size=1, latch = True)
         if not _emergency_evt.is_set():
-            sound_val = 1#sound_data()  # 1: bad, 0: good, -1/None: invalid
+            sound_val = sound_data()  # 1: bad, 0: good, -1/None: invalid
             sound_answer = "abnormal" if sound_val == 1 else ("normal" if sound_val == 0 else None)
-            sound_pub = rospy.Publisher("/mode_result", String, queue_size=1)
+            
             if sound_answer is not None:
                 sound_pub.publish(String(data=sound_answer))
             else:

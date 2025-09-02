@@ -117,7 +117,7 @@ def main():
         elif mode == 1:
             with lock: active_mode = 1; m1_steps = None
             p1 = start_node(['rosrun','mode1','mode1_node_ver2.py','__name:=mode1_node'], 'mode1')
-            res = wait_result(180.0, {'normal','abnormal'})
+            res = wait_result(300.0, {'normal','abnormal'})
             t0 = time.time()
             while m1_steps is None and p1.poll() is None and time.time()-t0 < 1.0:
                 time.sleep(0.05)

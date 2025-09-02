@@ -144,39 +144,85 @@ def publish_steps():
 # =====================
 # ABNORMAL: 후진/시퀀스
 # =====================
-def abnormal_mode(serial_port="/dev/ttyACM0", baud=9600, timeout=0.2):
+def abnormal_mode(should_stop=None, serial_port="/dev/ttyACM0", baud=9600, timeout=0.2):
     """
     후진: 거리 > 10cm면 정지 → 후속 시퀀스 전송
+    should_stop: callable -> True면 즉시 정지(비상정지 연동)
     """
     global moved_steps
-    rospy.loginfo("ABNORMAL: Moving backward until distance > 10cm")
+    rospy.loginfo("ABNORMAL: Moving backward until distance > 20cm")
     send_to_arduino("ABNORMAL", ensure_open=True, port=serial_port, baud=baud, timeout=timeout)
 
-    step = 8
+    STEP_BLOCK = 16
+    START_DELAY = 0.0030
+    MIN_DELAY = 0.0025
+    RAMP_FACTOR = 1.0
+    POLL_EVERY = 0.03
+    MAX_MISS = 100
+
+    REQ_COUNT = 5
+    below_cnt = 0
+    paused = False
+
+    step_delay = START_DELAY
     miss = 0
+    last_poll = 0.0
+
+    WARMUP_SEC = 0.7
+    t0 = time.time()
 
     ser = open_serial(serial_port, baud, timeout)
+
     try:
         while not rospy.is_shutdown():
-            try:
-                d = listen_from_arduino(ser=ser)
-                if d is None:
-                    miss += 1
-                    if miss >= 100:
-                        rospy.logwarn("[ABN] no distance received")
-                        break
+            if should_stop and should_stop():
+                rospy.logwarn("[GO] should_stop() -> STOP")
+                break
+
+            warmup = (time.time() - t0) < WARMUP_SEC
+
+            if not paused:
+                move_motor(STEP_BLOCK, delay=step_delay, direction=-1)
+                moved_steps += STEP_BLOCK
+                if step_delay > MIN_DELAY:
+                    step_delay = max(MIN_DELAY, step_delay * RAMP_FACTOR)
+
+            now = time.time()
+            if warmup:
+                continue
+
+            if (now - last_poll) >= POLL_EVERY:
+                last_poll = now
+                try:
+                    dist_cm = listen_from_arduino(ser=ser)
+                except Exception as e:
+                    rospy.logwarn(f"[GO] listen_from_arduino() failed: {e}")
+                    paused = True
                     continue
-                miss = 0
-            except Exception as e:
-                rospy.logwarn(f"[ABN] listen_from_arduino() failed: {e}")
-                break
 
-            if d > DIST_THRESHOLD_ABNORMAL:
-                rospy.loginfo("[ABN] Distance > 10cm -> STOP")
-                break
+                if dist_cm is None:
+                    miss += 1
+                    if miss >= MAX_MISS:
+                        rospy.logwarn("[GO] no distance received; staying PAUSED")
+                        paused = True
+                        miss = 0
+                    continue
+                else:
+                    miss = 0
 
-            move_motor(step, delay=DEFAULT_DELAY, direction=-1)
-            moved_steps -= step
+                if dist_cm > DIST_THRESHOLD_GO:
+                    below_cnt += 1
+                    if not paused:
+                        rospy.loginfo(f"[GO] {dist_cm:.2f}cm < threshold -> Soft Pause")
+                        paused = True
+                    if below_cnt >= REQ_COUNT:
+                        rospy.loginfo(f"[GO] below threshold {REQ_COUNT} times -> HARD STOP")
+                        break
+                else:
+                    if paused:
+                        rospy.loginfo(f"[GO] recovered ({dist_cm:.2f}cm) -> Resume")
+                    below_cnt = 0
+                    paused = False
     finally:
         publish_steps()
         send_to_arduino("STOP")
