@@ -1,25 +1,24 @@
+#!/home/tunnel/jetson_project/yolov_env/bin/python
+# arm_control.py
+
 import Jetson.GPIO as GPIO
 import time
 import rospy
 import serial
-import threading  # ADDED
+import threading
 
 from angle_calculate import listen_from_arduino
 from std_msgs.msg import Int32
 
-# === GPIO Setup ===
+# =====================
+# GPIO 설정
+# =====================
 IN1, IN2, IN3, IN4 = 17, 18, 27, 22
-# GPIO.setmode(GPIO.BCM)                               # CHANGED: remove eager init at import-time
-# for pin in [IN1, IN2, IN3, IN4]:                     # CHANGED: remove eager init at import-time
-#     GPIO.setup(pin, GPIO.OUT)
-#     GPIO.output(pin, 0)
 
-# ADDED: lazy init flags/lock
 _GPIO_INITED = False
 _GPIO_LOCK = threading.Lock()
 
-def _ensure_gpio_ready():  # ADDED
-    """Initialize GPIO once (lazy). Safe to call multiple times."""
+def _ensure_gpio_ready():
     global _GPIO_INITED
     if _GPIO_INITED:
         return
@@ -32,8 +31,7 @@ def _ensure_gpio_ready():  # ADDED
             GPIO.setup(pin, GPIO.OUT, initial=GPIO.LOW)
         _GPIO_INITED = True
 
-def cleanup_gpio():  # ADDED
-    """Release GPIO lines. Idempotent."""
+def cleanup_gpio():
     global _GPIO_INITED
     if not _GPIO_INITED:
         return
@@ -49,13 +47,69 @@ def cleanup_gpio():  # ADDED
             pass
         _GPIO_INITED = False
 
-distance_cm = 999.0
+# =====================
+# 전역 시리얼 (단일 핸들)
+# =====================
+_arduino = None
+_serial_lock = threading.Lock()
+
+def open_serial(port="/dev/ttyACM0", baud=9600, timeout=0.2):
+    """시리얼을 한 번만 오픈해서 전역으로 보관."""
+    global _arduino
+    if _arduino is None or (not _arduino.is_open):
+        _arduino = serial.Serial(port=port, baudrate=baud, timeout=timeout)
+        time.sleep(2.0)  # 보드 리셋 안정화
+        try:
+            _arduino.reset_input_buffer()
+            _arduino.reset_output_buffer()
+        except Exception:
+            pass
+        rospy.loginfo(f"[SERIAL] open {port}@{baud}")
+    return _arduino
+
+def current_serial():
+    """현재 전역 시리얼 핸들 반환(없으면 None)."""
+    return _arduino
+
+def close_serial():
+    """전역 시리얼 닫기(한 곳에서만 호출)."""
+    global _arduino
+    if _arduino and _arduino.is_open:
+        try:
+            _arduino.close()
+            rospy.loginfo("[SERIAL] closed")
+        except Exception:
+            pass
+    _arduino = None
+
+def send_to_arduino(msg: str, ensure_open=True, port="/dev/ttyACM0", baud=9600, timeout=0.2):
+    """쓰레드 세이프 TX. 필요 시 자동 오픈."""
+    ser = current_serial()
+    if ensure_open and (ser is None or not ser.is_open):
+        ser = open_serial(port, baud, timeout)
+    if ser is None or not ser.is_open:
+        rospy.logwarn("[SERIAL] not open; skip send")
+        return False
+    data = (msg + "\n").encode()
+    with _serial_lock:
+        try:
+            ser.write(data)
+            ser.flush()
+            rospy.loginfo(f"[TX->Arduino] {msg}")
+            return True
+        except Exception as e:
+            rospy.logwarn(f"[SERIAL] write fail: {e}")
+            return False
+
+# =====================
+# 모션/상수
+# =====================
 moved_steps = 0
 
 CM_PER_STEP = 1.0 / 450.0
-DEFAULT_SPEED_CM_S = 2.0
-DIST_THRESHOLD_GO = 5.0
-DIST_THRESHOLD_ABNORMAL = 10.0
+DEFAULT_DELAY = 0.001
+DIST_THRESHOLD_GO = 5.0          # < 5cm 이면 정지 (전진)
+DIST_THRESHOLD_ABNORMAL = 10.0   # > 10cm 이면 정지 (후진)
 
 SEQ = [
     [1, 0, 0, 0],
@@ -65,26 +119,15 @@ SEQ = [
     [0, 0, 1, 0],
     [0, 0, 1, 1],
     [0, 0, 0, 1],
-    [1, 0, 0, 1]
+    [1, 0, 0, 1],
 ]
 
-def send_to_arduino(msg: str, port='/dev/ttyACM0'):
-    baud = 9600
-    try:
-        with serial.Serial(port, baud, timeout=1) as ard:
-            ard.write(f"{msg}\n".encode())
-            rospy.loginfo(f"[TX->Arduino] {msg}")  # CHANGED: removed non-ASCII text
-    except serial.SerialException as e:
-        rospy.logerr(f"Serial error: {e}")
-
-'''
-def distance_callback(msg):
-    global distance_cm
-    distance_cm = msg.data
-'''
+# 런타임 전역
+step_pub = None
 
 def move_motor(steps, delay=0.005, direction=1):
-    _ensure_gpio_ready()  # ADDED
+    """direction=+1 전진, -1 후진"""
+    _ensure_gpio_ready()
     seq = SEQ if direction == 1 else SEQ[::-1]
     for _ in range(steps):
         for pattern in seq:
@@ -94,106 +137,93 @@ def move_motor(steps, delay=0.005, direction=1):
             GPIO.output(IN4, pattern[3])
             time.sleep(delay)
 
-'''
-def move_cm(cm, speed_cm_per_s=DEFAULT_SPEED_CM_S, direction=1):
-    steps = int(abs(cm) / CM_PER_STEP)
-    delay = max(0.002, 1.0 / (speed_cm_per_s * 450))
-    move_motor(steps, delay=delay, direction=direction)
-    return steps
-'''
+def publish_steps():
+    if step_pub is not None:
+        step_pub.publish(Int32(data=moved_steps))
 
-def cleanup():
-    # CHANGED: ensure init before driving pins low (safe even if not inited)
-    if not _GPIO_INITED:
-        return
-    for pin in [IN1, IN2, IN3, IN4]:
-        try:
-            GPIO.output(pin, 0)
-        except Exception:
-            pass
-
-# === GO ===
-def go_mode(dist_cm):
-    global moved_steps
-    rospy.loginfo("GO: Moving forward until distance < 5cm")
-    send_to_arduino("GO")
-    delay = max(0.002, 1.0 / (DEFAULT_SPEED_CM_S * 450))
-    step = 1
-    miss = 0
-    while not rospy.is_shutdown():
-        try:
-            dist_cm = listen_from_arduino()
-            if dist_cm is None:
-                miss += 1
-                if miss >= 100:
-                    rospy.logwarn("no distance received")
-                    break
-                continue
-            miss = 0
-        except Exception as e:
-            rospy.logwarn(f"listen_from_arduino() failed : {e}")
-            break
-
-        # NOTE: original code checks 'distance_cm' (global) here; kept as-is to minimize changes.
-        if distance_cm < DIST_THRESHOLD_GO:
-            rospy.loginfo("Distance < 5cm -> STOP")
-            break
-        move_motor(step, delay=delay, direction=1)
-        moved_steps += step
-
-    send_to_arduino("STOP")
-    cleanup()
-
-# === ABNORMAL ===
-def abnormal_mode():
+# =====================
+# ABNORMAL: 후진/시퀀스
+# =====================
+def abnormal_mode(serial_port="/dev/ttyACM0", baud=9600, timeout=0.2):
+    """
+    후진: 거리 > 10cm면 정지 → 후속 시퀀스 전송
+    """
     global moved_steps
     rospy.loginfo("ABNORMAL: Moving backward until distance > 10cm")
-    send_to_arduino("ABNORMAL")
-    delay = max(0.002, 1.0 / (DEFAULT_SPEED_CM_S * 450))
-    step = 1
+    send_to_arduino("ABNORMAL", ensure_open=True, port=serial_port, baud=baud, timeout=timeout)
+
+    step = 8
     miss = 0
-    while not rospy.is_shutdown():
-        try:
-            d = listen_from_arduino()
-            if d is None:
-                miss += 1
-                if miss >= 100:
-                    rospy.logwarn("no distance received")
-                    break
-                continue
-            miss = 0
-        except Exception as e:
-            rospy.logwarn(f"listen_from_arduino() failed : {e}")
-            break
 
-        if d > DIST_THRESHOLD_ABNORMAL:
-            rospy.loginfo("Distance > 10cm -> STOP")  # CHANGED: removed non-ASCII text
-            break
-        move_motor(step, delay=delay, direction=-1)
-        moved_steps -= step
+    ser = open_serial(serial_port, baud, timeout)
+    try:
+        while not rospy.is_shutdown():
+            try:
+                d = listen_from_arduino(ser=ser)
+                if d is None:
+                    miss += 1
+                    if miss >= 100:
+                        rospy.logwarn("[ABN] no distance received")
+                        break
+                    continue
+                miss = 0
+            except Exception as e:
+                rospy.logwarn(f"[ABN] listen_from_arduino() failed: {e}")
+                break
 
-    send_to_arduino("STOP")
-    cleanup()
+            if d > DIST_THRESHOLD_ABNORMAL:
+                rospy.loginfo("[ABN] Distance > 10cm -> STOP")
+                break
+
+            move_motor(step, delay=DEFAULT_DELAY, direction=-1)
+            moved_steps -= step
+    finally:
+        publish_steps()
+        send_to_arduino("STOP")
+        cleanup_gpio()
+
+    # 후속 동작(필요 시 조정)
     send_to_arduino("1,F,2.0,5")
     send_to_arduino("2,F,30.0,90")
     time.sleep(5)
 
-# === NORMAL ===
+# =====================
+# NORMAL: 복귀
+# =====================
 def normal_mode():
+    """원위치 복귀: 이동한 스텝만큼 되감기"""
     global moved_steps
     rospy.loginfo(f"NORMAL: Returning {moved_steps} steps forward")
-    delay = max(0.002, 1.0 / (DEFAULT_SPEED_CM_S * 450))
-    move_motor(moved_steps, delay=delay, direction=-1)
-    moved_steps = 0
-    rospy.loginfo("Return complete.")
+    delay = DEFAULT_DELAY
+    try:
+        if moved_steps > 0:
+            move_motor(moved_steps, delay=delay, direction=-1)
+        moved_steps = 0
+        rospy.loginfo("Return complete.")
+        publish_steps()
+    finally:
+        cleanup_gpio()
 
-# === QUIT ===
+# =====================
+# QUIT: 종료 정리
+# =====================
 def quit_mode():
+    """종료: 모든 모터 off + GPIO 해제"""
     rospy.loginfo("QUIT: Turning off all motors")
-    send_to_arduino("QUIT")
-    cleanup()
-    cleanup_gpio()  # CHANGED: release GPIO lines instead of GPIO.cleanup() direct
+    send_to_arduino("QUIT", ensure_open=False)  # 이미 닫혀 있어도 무시됨
+    cleanup_gpio()
 
-def for_step_publish():
+# =====================
+# (옵션) 노드 초기화/정리
+# =====================
+def init_node(node_name="motor_controller", port="/dev/ttyACM0", baud=9600, timeout=0.2):
+    global step_pub
+    rospy.init_node(node_name, anonymous=False)
     step_pub = rospy.Publisher("/steps", Int32, queue_size=10)
-    step_pub.publish(Int32(data=moved_steps))
+    open_serial(port=port, baud=baud, timeout=timeout)  # 한 번만 오픈
+
+def shutdown_node():
+    try:
+        cleanup_gpio()
+    finally:
+        close_serial()  # 전역 한 곳에서만 닫기

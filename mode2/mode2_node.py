@@ -77,8 +77,6 @@ class Mode2Node:
 
     def __init__(self):
         rospy.init_node("mode2_node")
-        self.serial_port  = P("serial_port", "/dev/ttyACM0")
-        self.serial_baud  = P("serial_baud", 9600)
         self.i2c_bus_id   = P("i2c_bus", 0)
         self.i2c_addr     = P("i2c_address", 0x08)
         self.linear_speed = P("linear_speed_cm_s", 3.0)

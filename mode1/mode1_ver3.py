@@ -5,23 +5,14 @@ import threading
 import time
 import sys
 from std_msgs.msg import String, Int32
-from smbus2 import i2c_msg
+from smbus2 import i2c_msg, SMBus
 
 # arm_control에서만 시리얼을 열고/닫음
-from arm_control import (go_mode, quit_mode, send_to_arduino, shutdown_node)
+from arm_control import (init_node, go_mode, quit_mode, send_to_arduino, shutdown_node)
 from sound_data import sound_data
-
-try:
-    from smbus2 import SMBus
-except ImportError:
-    SMBus = None
 
 def param(name, default):
     return rospy.get_param("~" + name, default)
-
-# UART(시리얼) 설정은 여기서 쓰지 않음 (arm_control만 사용)
-# UART1_PORT = None
-# UART1_BAUD = 9600
 
 I2C_BUS_NO = 0
 I2C_ADDR2  = 0x18  # pillar/slide
@@ -218,6 +209,7 @@ def run_mode1_sequence():
 def main():
     global i2c_bus
     rospy.init_node("mode1_node")
+    init_node(node_name="motor_controller", port="/dev/ttyACM0", baud=9600, timeout=0.2)
 
     global I2C_BUS_NO, I2C_ADDR2, I2C_ADDR3
     I2C_BUS_NO = param("i2c_bus_no",  0)
@@ -240,14 +232,9 @@ def main():
         else:
             rospy.logwarn("[I2C] smbus2 not installed; I2C control unavailable")
 
-        should_exit = False
-
         if not _emergency_evt.is_set():
             ok = run_mode1_sequence()
             rospy.loginfo(f"mode 1 sequence done, ok={ok}")
-            # 노드가 종료 신호를 받았거나(타임아웃 등), 비상 이벤트면 즉시 종료
-            if rospy.is_shutdown() or _emergency_evt.is_set() or (not ok):
-                should_exit = True
 
         if not _emergency_evt.is_set():
             try:
@@ -257,7 +244,7 @@ def main():
                 rospy.logwarn(f"go_mode failed: {e}")
 
         if not _emergency_evt.is_set():
-            sound_val = sound_data()  # 1: bad, 0: good, -1/None: invalid
+            sound_val = 1#sound_data()  # 1: bad, 0: good, -1/None: invalid
             sound_answer = "abnormal" if sound_val == 1 else ("normal" if sound_val == 0 else None)
             sound_pub = rospy.Publisher("/mode_result", String, queue_size=1)
             if sound_answer is not None:

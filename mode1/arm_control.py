@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/home/tunnel/jetson_project/yolov_env/bin/python
 # arm_control.py — ArduinoLink 제거 버전 (전역 시리얼 1개 + 함수형)
 
 import Jetson.GPIO as GPIO
@@ -150,12 +150,24 @@ def go_mode(should_stop=None, serial_port="/dev/ttyACM0", baud=9600, timeout=0.2
     should_stop: callable -> True면 즉시 정지(비상정지 연동)
     """
     global moved_steps
+    moved_steps = 0
     rospy.loginfo("GO: Moving forward until distance < 5cm")
     send_to_arduino("GO", ensure_open=True, port=serial_port, baud=baud, timeout=timeout)
 
     # 최신 코드 반영(감속 포함): 450*8
     step = 8
     miss = 0
+
+    # ===== [NEW] 필터/판정 파라미터 =====
+    MAX_JUMP_CM   = 25.0   # 직전 유효값 대비 이만큼 이상 급변하면 1회 무시(스파이크 억제)
+    EMA_ALPHA     = 0.35   # 0~1 (낮을수록 더 완만하게 변함)
+    REQ_COUNT     = 2      # 임계 미만이 연속 몇 번 나와야 STOP할지 (디바운스)
+    RESUME_HYST   = 3.0    # 히스테리시스: 재상승 시 임계 + 이 값 이상이어야 카운트 리셋
+
+    # ===== [NEW] 필터 상태 =====
+    last_valid_cm = None   # 스파이크 판정 기준
+    ema_cm        = None   # 저역통과 결과(EMA)
+    below_cnt     = 0      # 임계 미만 연속 카운트
 
     ser = open_serial(serial_port, baud, timeout)  # 동일 핸들 확보
     try:
@@ -176,79 +188,47 @@ def go_mode(should_stop=None, serial_port="/dev/ttyACM0", baud=9600, timeout=0.2
                 rospy.logwarn(f"[GO] listen_from_arduino() failed: {e}")
                 break
 
-            if dist_cm < DIST_THRESHOLD_GO:
-                rospy.loginfo("[GO] Distance < 5cm -> STOP")
+            # ===== [NEW] 스파이크 억제 =====
+            if last_valid_cm is not None and abs(dist_cm - last_valid_cm) > MAX_JUMP_CM:
+                used = last_valid_cm     # 과도 점프는 1회 무시
+            else:
+                used = dist_cm
+                last_valid_cm = dist_cm
+
+            # ===== [NEW] EMA 저역통과 =====
+            if ema_cm is None:
+                ema_cm = float(used)
+            else:
+                ema_cm = EMA_ALPHA * float(used) + (1.0 - EMA_ALPHA) * ema_cm
+
+            # ===== [NEW] 디바운스 + 히스테리시스 =====
+            thresh = float(DIST_THRESHOLD_GO)
+            resume_thresh = thresh + RESUME_HYST
+
+            if ema_cm < thresh:
+                below_cnt += 1
+            elif ema_cm >= resume_thresh:
+                # 충분히 멀어졌을 때만 카운트 리셋(플래핑 방지)
+                below_cnt = 0
+            # (임계와 resume 사이 구간에선 카운트 유지)
+
+            rospy.logdebug(f"[GO] raw={dist_cm:.1f} used={used:.1f} ema={ema_cm:.1f} below_cnt={below_cnt}")
+
+            # ===== [CHANGED] 정지 판정: 연속 REQ_COUNT회 미만일 때만 STOP =====
+            if below_cnt >= REQ_COUNT:
+                rospy.loginfo(f"[GO] Distance < {thresh:.1f}cm (debounced {REQ_COUNT}x) -> STOP")
                 break
 
+            # 원래 동작 유지
             move_motor(step, delay=DEFAULT_DELAY, direction=1)
             moved_steps += step
     finally:
         publish_steps()
+        send_to_arduino("HIT")
+        rospy.sleep(2)
         send_to_arduino("STOP")
         cleanup_gpio()
 
-# =====================
-# ABNORMAL: 후진/시퀀스
-# =====================
-def abnormal_mode(serial_port="/dev/ttyACM0", baud=9600, timeout=0.2):
-    """
-    후진: 거리 > 10cm면 정지 → 후속 시퀀스 전송
-    """
-    global moved_steps
-    rospy.loginfo("ABNORMAL: Moving backward until distance > 10cm")
-    send_to_arduino("ABNORMAL", ensure_open=True, port=serial_port, baud=baud, timeout=timeout)
-
-    step = 8
-    miss = 0
-
-    ser = open_serial(serial_port, baud, timeout)
-    try:
-        while not rospy.is_shutdown():
-            try:
-                d = listen_from_arduino(ser=ser)
-                if d is None:
-                    miss += 1
-                    if miss >= 100:
-                        rospy.logwarn("[ABN] no distance received")
-                        break
-                    continue
-                miss = 0
-            except Exception as e:
-                rospy.logwarn(f"[ABN] listen_from_arduino() failed: {e}")
-                break
-
-            if d > DIST_THRESHOLD_ABNORMAL:
-                rospy.loginfo("[ABN] Distance > 10cm -> STOP")
-                break
-
-            move_motor(step, delay=DEFAULT_DELAY, direction=-1)
-            moved_steps -= step
-    finally:
-        publish_steps()
-        send_to_arduino("STOP")
-        cleanup_gpio()
-
-    # 후속 동작(필요 시 조정)
-    send_to_arduino("1,F,2.0,5")
-    send_to_arduino("2,F,30.0,90")
-    time.sleep(5)
-
-# =====================
-# NORMAL: 복귀
-# =====================
-def normal_mode():
-    """원위치 복귀: 이동한 스텝만큼 되감기"""
-    global moved_steps
-    rospy.loginfo(f"NORMAL: Returning {moved_steps} steps forward")
-    delay = DEFAULT_DELAY
-    try:
-        if moved_steps > 0:
-            move_motor(moved_steps, delay=delay, direction=-1)
-        moved_steps = 0
-        rospy.loginfo("Return complete.")
-        publish_steps()
-    finally:
-        cleanup_gpio()
 
 # =====================
 # QUIT: 종료 정리
