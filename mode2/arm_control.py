@@ -137,9 +137,19 @@ def move_motor(steps, delay=0.005, direction=1):
             GPIO.output(IN4, pattern[3])
             time.sleep(delay)
 
+def _ensure_step_pub():
+    """mode2가 이미 rospy.init_node()를 한 상태에서, 처음 필요 시 /step 퍼블리셔 생성"""
+    global step_pub
+    if step_pub is None:
+        step_pub = rospy.Publisher("/step", Int32, queue_size=10, latch=True)
+
 def publish_steps():
-    if step_pub is not None:
-        step_pub.publish(Int32(data=moved_steps))
+    """누적 step 1회만 내보내도 되므로 latch 사용"""
+    if not rospy.core.is_initialized():
+        # 안전장치: 혹시라도 init이 안 됐다면 퍼블리시 생략
+        return
+    _ensure_step_pub()
+    step_pub.publish(Int32(data=moved_steps))
 
 # =====================
 # ABNORMAL: 후진/시퀀스
@@ -213,7 +223,7 @@ def abnormal_mode(should_stop=None, serial_port="/dev/ttyACM0", baud=9600, timeo
                 if dist_cm > DIST_THRESHOLD_GO:
                     below_cnt += 1
                     if not paused:
-                        rospy.loginfo(f"[GO] {dist_cm:.2f}cm < threshold -> Soft Pause")
+                        rospy.loginfo(f"[GO] {dist_cm:.2f}cm > threshold -> Soft Pause")
                         paused = True
                     if below_cnt >= REQ_COUNT:
                         rospy.loginfo(f"[GO] below threshold {REQ_COUNT} times -> HARD STOP")
@@ -228,27 +238,10 @@ def abnormal_mode(should_stop=None, serial_port="/dev/ttyACM0", baud=9600, timeo
         send_to_arduino("STOP")
         cleanup_gpio()
 
-    # 후속 동작(필요 시 조정)
-    send_to_arduino("1,F,2.0,5")
-    send_to_arduino("2,F,30.0,90")
-    time.sleep(5)
-
-# =====================
-# NORMAL: 복귀
-# =====================
-def normal_mode():
-    """원위치 복귀: 이동한 스텝만큼 되감기"""
-    global moved_steps
-    rospy.loginfo(f"NORMAL: Returning {moved_steps} steps forward")
-    delay = DEFAULT_DELAY
-    try:
-        if moved_steps > 0:
-            move_motor(moved_steps, delay=delay, direction=-1)
-        moved_steps = 0
-        rospy.loginfo("Return complete.")
-        publish_steps()
-    finally:
-        cleanup_gpio()
+    # # 후속 동작(필요 시 조정)
+    # send_to_arduino("1,F,2.0,5")
+    # send_to_arduino("2,F,30.0,90")
+    # time.sleep(5)
 
 # =====================
 # QUIT: 종료 정리
@@ -259,15 +252,10 @@ def quit_mode():
     send_to_arduino("QUIT", ensure_open=False)  # 이미 닫혀 있어도 무시됨
     cleanup_gpio()
 
-# =====================
-# (옵션) 노드 초기화/정리
-# =====================
-def init_node(node_name="motor_controller", port="/dev/ttyACM0", baud=9600, timeout=0.2):
-    global step_pub
-    rospy.init_node(node_name, anonymous=False)
-    step_pub = rospy.Publisher("/steps", Int32, queue_size=10)
-    open_serial(port=port, baud=baud, timeout=timeout)  # 한 번만 오픈
-
+def init_lib(port="/dev/ttyACM0", baud=9600, timeout=0.2):
+    """library 초기화: 노드 생성 없이 전역 시리얼만 준비"""
+    open_serial(port=port, baud=baud, timeout=timeout)
+    
 def shutdown_node():
     try:
         cleanup_gpio()

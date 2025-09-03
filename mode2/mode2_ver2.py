@@ -16,6 +16,7 @@ def P(name, default):
     return rospy.get_param("~" + name, default)
 
 # ============ I2C Helper Class ============
+
 class ArduinoI2C:
     """단일 I2C 대상 주소로 텍스트 명령 전송"""
     def __init__(self, bus: SMBus, addr: int):
@@ -31,18 +32,6 @@ class ArduinoI2C:
         except Exception as e:
             rospy.logwarn(f"[I2C->0x{self.addr:02X}] send fail: {e}")
 
-    # 편의 명령 (필요시 문자열만 팀 프로토콜에 맞게 바꾸면 됨)
-    def drive_q(self): self.send_text('q')  # W/S 정지
-    def pillar_up(self): self.send_text('UP')
-    def pillar_stop(self): self.send_text('PILLAR_STOP')
-    def servo_deg(self, deg: int): self.send_text(f"b{int(deg)}")
-    def shoot(self, ms: int): self.send_text(f"SHOOT,{int(ms)}")
-    def shoot_stop(self): self.send_text("SHOOT_STOP")
-
-# ============ 전역(비상정지에서 참조) ============
-A2 = None  # 0x18 pillar/slide
-A3 = None  # 0x08 W/S drive (servo 등)
-
 # ============ Emergency Stop ============
 _emergency_evt = threading.Event()
 
@@ -52,24 +41,21 @@ def emergency_stop(reason="keyboard"):
         _emergency_evt.set()
         rospy.logwarn(f"[EMERGENCY] stop triggered ({reason})")
 
-        # I2C 정지들 (객체가 준비돼 있을 때만)
+        # I2C 쪽: 존재하지 않는 pillar_stop() 대신 텍스트 명령으로 안전정지 지시(있다면)
         try:
-            if A3 is not None: A3.drive_q()
+            if 'A2' in globals() and A2:
+                A2.send_text("PILLAR_STOP")
         except Exception as e:
-            rospy.logwarn(f"[EMERGENCY] drive stop fail: {e}")
+            rospy.logwarn(f"[EMERGENCY] I2C stop fail: {e}")
 
+        # UART 쪽: arm_control 함수만 사용
         try:
-            if A2 is not None: A2.pillar_stop()
+            quit_mode()
         except Exception as e:
-            rospy.logwarn(f"[EMERGENCY] pillar stop fail: {e}")
-
-        # UART 쪽
-        try: quit_mode()
-        except Exception as e: rospy.logwarn(f"[EMERGENCY] quit_mode failed: {e}")
+            rospy.logwarn(f"[EMERGENCY] quit_mode failed: {e}")
 
         try:
-            # 새로 열지 않음: 이미 열려 있을 때만 전송
-            send_to_arduino("STOP", ensure_open=False)
+            send_to_arduino("STOP", ensure_open=False)  # 새로 열지 않음
         except Exception as e:
             rospy.logwarn(f"[EMERGENCY] UART notify failed: {e}")
 
@@ -92,10 +78,8 @@ def keyboard_listener_thread():
 
 # ============ Mode2 Node ============
 class Mode2Node:
-    def __init__(self, a2: ArduinoI2C, a3: ArduinoI2C):
+    def __init__(self, a2: ArduinoI2C):
         self.a2 = a2
-        self.a3 = a3
-
         # 파라미터
         self.linear_speed = P("linear_speed_cm_s", 3.0)
         self.theta_scale  = P("theta_speed_scale", 3.0)
@@ -151,9 +135,9 @@ class Mode2Node:
     def _publish_results_and_cleanup(self):
         try:
             self.send_text("STOP", sleep_after=0.02)
-            if self.a2: self.a2.shoot_stop()
+            if self.a2: self.a2.send_text("shoot_stop")
             self.send_text("QUIT", sleep_after=0.02)
-            self.pub_done.publish(String("done"))
+            self.pub_done.publish(String(data="done"))
         except Exception as e:
             rospy.logwarn(f"[mode2] cleanup error: {e}")
 
@@ -170,11 +154,6 @@ class Mode2Node:
             rospy.loginfo(f"[mode2] pre-position to ({self.pre_r:.2f}, {self.pre_theta:.2f}) (Δr={dr0:.2f}, Δθ={dth0:.2f})")
             self._send_delta_move(dr0, dth0)
             time.sleep(self._estimate_move_time(abs(dr0), abs(dth0)) + self.segment_pad)
-
-            # (옵션) 서보 각도 0도
-            if self.a3: 
-                self.a3.servo_deg(0)
-                time.sleep(2.0)
 
             # 3) 경로 캡처
             rospy.loginfo("[mode2] capturing path (validated one-shot)...")
@@ -205,13 +184,16 @@ class Mode2Node:
             for idx, (r, th) in enumerate(path, start=1):
                 dr  = r  - prev_r
                 dth = th - prev_th
+                if self.a2: self.a2.send_text("shoot")
                 self._send_delta_move(dr, dth)
                 move_time = self._estimate_move_time(abs(dr), abs(dth))
                 time.sleep(move_time + self.segment_pad)
 
-                rospy.loginfo(f"[mode2] shoot {self.shoot_ms}ms @ point {idx}/{len(path)}")
-                if self.a2: self.a2.shoot(self.shoot_ms)
-                time.sleep(min(self.shoot_ms/1000.0, 0.2))
+                if self.a2:
+                    self.a2.send_text("shoot_rev")
+                    time.sleep(1)
+                    self.a2.send_text("shoot_stop")
+                rospy.loginfo(f"[mode2] segent {idx}/{len(path)} done")
                 prev_r, prev_th = r, th
 
             # 5) 포스트 포지션
@@ -235,7 +217,7 @@ class Mode2Node:
 
 # ============ main ============
 def main():
-    global A2, A3
+    global A2
 
     rospy.init_node("mode2_node")
 
@@ -245,23 +227,16 @@ def main():
     # I2C 준비
     bus_no   = P("i2c_bus_no", 0)
     addr_a2  = P("arduino2_addr", 0x18)  # pillar/slide
-    addr_a3  = P("arduino3_addr", 0x08)  # W/S drive/servo
 
     bus = None
     try:
         bus = SMBus(bus_no)
-        rospy.loginfo(f"[I2C] bus {bus_no} ready, A2=0x{addr_a2:02X}, A3=0x{addr_a3:02X}")
+        A2 = ArduinoI2C(bus, addr_a2)
+        rospy.loginfo(f"[I2C] bus {bus_no} ready, A2=0x{addr_a2:02X}")
     except Exception as e:
         rospy.logwarn(f"[I2C] open fail: {e}")
 
-    if bus is not None:
-        A2 = ArduinoI2C(bus, addr_a2)
-        A3 = ArduinoI2C(bus, addr_a3)
-    else:
-        A2 = None
-        A3 = None
-
-    node = Mode2Node(A2, A3)
+    node = Mode2Node(A2)
 
     try:
         node.run()

@@ -8,7 +8,7 @@ from std_msgs.msg import String, Int32
 from smbus2 import i2c_msg, SMBus
 
 # arm_control에서만 시리얼을 열고/닫음
-from arm_control import (init_node, go_mode, quit_mode, send_to_arduino, shutdown_node)
+from arm_control import (go_mode, quit_mode, send_to_arduino, shutdown_node)
 from sound_data import sound_data
 
 def param(name, default):
